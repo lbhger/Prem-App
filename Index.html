@@ -963,22 +963,27 @@ async function initAuth() {
 async function _applySession(session) {
   currentUserId = session.user.id;
 
-  // Load this user's profile
-  const { data: profile } = await sb
-    .from('profiles')
-    .select('username, is_admin')
-    .eq('id', currentUserId)
-    .single();
+  // Fetch profile from Supabase — retry once in case the insert just happened
+  let profile = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { data } = await sb
+      .from('profiles')
+      .select('username, is_admin')
+      .eq('id', currentUserId)
+      .maybeSingle();
+    if (data) { profile = data; break; }
+    if (attempt === 0) await new Promise(r => setTimeout(r, 600)); // wait 600ms then retry
+  }
 
   currentUser        = profile?.username || session.user.email.split('@')[0];
   currentUserIsAdmin = profile?.is_admin || false;
 
   DB.users[currentUser] = {
-    username:  currentUser,
-    id:        currentUserId,
-    is_admin:  currentUserIsAdmin,
-    isGuest:   false,
-    isAdmin:   currentUserIsAdmin,
+    username: currentUser,
+    id:       currentUserId,
+    is_admin: currentUserIsAdmin,
+    isGuest:  false,
+    isAdmin:  currentUserIsAdmin,
   };
 
   // Load all predictions for leaderboard
@@ -1157,6 +1162,12 @@ async function doRegister() {
 
   // If session exists immediately, email confirmation is disabled — sign them in now
   if (data.session) {
+    // Manually insert the profile row (more reliable than the DB trigger)
+    await sb.from('profiles').upsert({
+      id:       data.user.id,
+      username: username,
+    }, { onConflict: 'id' });
+
     await _applySession(data.session);
     ranked = [];
     recalcAll();
@@ -1164,7 +1175,11 @@ async function doRegister() {
     toast('Account created! Welcome, ' + currentUser + '! 🎉', 'success');
     navigate('predict');
   } else {
-    // Email confirmation required
+    // Email confirmation required — insert profile now so it's ready when they confirm
+    await sb.from('profiles').upsert({
+      id:       data.user.id,
+      username: username,
+    }, { onConflict: 'id' });
     errEl.innerHTML = '<div class="error-msg" style="color:var(--green)">✓ Check your email to confirm your account, then sign in.</div>';
   }
 }
